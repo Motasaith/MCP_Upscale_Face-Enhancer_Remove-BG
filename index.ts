@@ -414,7 +414,10 @@ app.use(express.urlencoded({ extended: true })); // for OAuth form-encoded token
 // ── OAuth 2.0 endpoints (for Grok and other OAuth-requiring clients) ──────
 // RFC 8414 — Authorization Server Metadata
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  // Heroku terminates SSL at the router, so the app sees http internally.
+  // Trust the x-forwarded-proto header to get the real protocol.
+  const proto = req.headers["x-forwarded-proto"] || req.protocol;
+  const baseUrl = `${proto}://${req.get("host")}`;
   res.json({
     issuer: baseUrl,
     authorization_endpoint: `${baseUrl}/authorize`,
