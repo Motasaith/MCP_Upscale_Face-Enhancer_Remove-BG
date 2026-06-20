@@ -380,6 +380,7 @@ function checkAuth(req: any): boolean {
 // ── HTTP transport (remote, so Claude / ChatGPT / Grok can all reach it) ──
 const app = express();
 app.use(express.json({ limit: "15mb" })); // base64 inflates ~33%
+app.use(express.urlencoded({ extended: true })); // for OAuth form-encoded token requests
 
 // ── OAuth 2.0 endpoints (for Grok and other OAuth-requiring clients) ──────
 // RFC 8414 — Authorization Server Metadata
