@@ -344,17 +344,155 @@ server.tool(
   }
 );
 
+// ── Auth config ───────────────────────────────────────────────────────────
+// Three modes supported:
+//   1. No auth (MCP_AUTH_KEY empty) — works with Claude web, no headers needed
+//   2. Bearer token (MCP_AUTH_KEY set) — works with Claude Desktop
+//   3. OAuth 2.0 (OAUTH_ENABLED=true) — works with Grok and other OAuth clients
+const OAUTH_ENABLED = process.env.OAUTH_ENABLED === "true";
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "";
+const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "";
+
+// ── OAuth token store (in-memory, simple) ─────────────────────────────────
+const oauthTokens = new Map<string, { clientId: string; expiresAt: number }>();
+
+// ── Auth check helper ─────────────────────────────────────────────────────
+function checkAuth(req: any): boolean {
+  // If no auth configured at all, allow everything (Claude web mode)
+  if (!MCP_AUTH_KEY && !OAUTH_ENABLED) return true;
+
+  const authHeader = req.headers["authorization"] as string | undefined;
+  if (!authHeader) return false;
+
+  // Check Bearer token (static key)
+  if (MCP_AUTH_KEY && authHeader === `Bearer ${MCP_AUTH_KEY}`) return true;
+
+  // Check OAuth token
+  if (OAUTH_ENABLED && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.slice(7);
+    const record = oauthTokens.get(token);
+    if (record && record.expiresAt > Date.now()) return true;
+  }
+
+  return false;
+}
+
 // ── HTTP transport (remote, so Claude / ChatGPT / Grok can all reach it) ──
 const app = express();
 app.use(express.json({ limit: "15mb" })); // base64 inflates ~33%
 
-app.post("/mcp", async (req, res) => {
-  if (MCP_AUTH_KEY) {
-    const authHeader = req.headers["authorization"];
-    if (authHeader !== `Bearer ${MCP_AUTH_KEY}`) {
-      res.status(401).json({ error: "Unauthorized" });
+// ── OAuth 2.0 endpoints (for Grok and other OAuth-requiring clients) ──────
+// RFC 8414 — Authorization Server Metadata
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  res.json({
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/authorize`,
+    token_endpoint: `${baseUrl}/token`,
+    registration_endpoint: `${baseUrl}/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "client_credentials"],
+    token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+    code_challenge_methods_supported: ["S256", "plain"],
+    scopes_supported: ["tools:call"],
+  });
+});
+
+// RFC 7591 — Dynamic Client Registration
+app.post("/register", (req, res) => {
+  // Accept any client registration (simplified — no persistent store needed)
+  const clientId = req.body.client_id || OAUTH_CLIENT_ID || `client_${Date.now()}`;
+  const clientSecret = req.body.client_secret || OAUTH_CLIENT_SECRET || `secret_${Date.now()}`;
+
+  res.status(201).json({
+    client_id: clientId,
+    client_secret: clientSecret,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    token_endpoint_auth_method: req.body.token_endpoint_auth_method || "client_secret_post",
+    grant_types: ["authorization_code", "client_credentials"],
+    response_types: ["code"],
+    scope: "tools:call",
+  });
+});
+
+// OAuth 2.0 Authorization endpoint
+app.get("/authorize", (req, res) => {
+  const clientId = req.query.client_id as string;
+  const redirectUri = req.query.redirect_uri as string;
+  const state = req.query.state as string;
+  const responseType = req.query.response_type as string;
+
+  if (!clientId || !redirectUri || responseType !== "code") {
+    res.status(400).json({ error: "invalid_request", error_description: "Missing required parameters" });
+    return;
+  }
+
+  // Auto-approve — generate an authorization code
+  const code = `authcode_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const redirectUrl = `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state || "")}`;
+  res.redirect(302, redirectUrl);
+});
+
+// OAuth 2.0 Token endpoint
+app.post("/token", (req, res) => {
+  const grantType = req.body.grant_type as string;
+
+  if (grantType === "authorization_code") {
+    // Exchange auth code for access token (we don't strictly validate the code)
+    const token = `oauth_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    oauthTokens.set(token, {
+      clientId: req.body.client_id || "unknown",
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+    });
+    res.json({
+      access_token: token,
+      token_type: "Bearer",
+      expires_in: 86400,
+      scope: "tools:call",
+    });
+    return;
+  }
+
+  if (grantType === "client_credentials") {
+    // Client credentials flow — verify client_id/secret if configured
+    const clientId = req.body.client_id as string;
+    const clientSecret = req.body.client_secret as string;
+
+    if (OAUTH_CLIENT_ID && (clientId !== OAUTH_CLIENT_ID || clientSecret !== OAUTH_CLIENT_SECRET)) {
+      res.status(401).json({ error: "invalid_client", error_description: "Invalid client credentials" });
       return;
     }
+
+    const token = `oauth_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    oauthTokens.set(token, {
+      clientId: clientId || "unknown",
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    });
+    res.json({
+      access_token: token,
+      token_type: "Bearer",
+      expires_in: 86400,
+      scope: "tools:call",
+    });
+    return;
+  }
+
+  res.status(400).json({ error: "unsupported_grant_type" });
+});
+
+// ── MCP endpoint ──────────────────────────────────────────────────────────
+app.post("/mcp", async (req, res) => {
+  if (!checkAuth(req)) {
+    // Return OAuth-style 401 so clients know to authenticate
+    if (OAUTH_ENABLED) {
+      res.status(401).json({
+        error: "invalid_token",
+        error_description: "Missing or invalid access token",
+      });
+    } else {
+      res.status(401).json({ error: "Unauthorized" });
+    }
+    return;
   }
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
