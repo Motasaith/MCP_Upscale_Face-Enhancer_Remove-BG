@@ -141,14 +141,16 @@ This guide is written for **your specific VPS** (Ubuntu 24.04, IP `167.88.43.163
 
 ### Step 1: Install pm2 (process manager)
 
-pm2 is not installed on your VPS yet. Install it:
+pm2 is not installed on your VPS yet. SSH into your VPS and install it:
 
 ```bash
+ssh root@167.88.43.163
 npm install -g pm2
 ```
 
 ### Step 2: Clone the repo
 
+**If the repo is public:**
 ```bash
 cd /opt
 git clone https://github.com/Motasaith/MCP_Upscale_Face-Enhancer_Remove-BG.git wisetech-mcp
@@ -156,6 +158,19 @@ cd wisetech-mcp
 npm install
 npm run build
 ```
+
+**If the repo is private**, generate a Personal Access Token first:
+1. Go to https://github.com/settings/tokens → "Generate new token (classic)" → check `repo` → generate
+2. Copy the token, then on the VPS:
+```bash
+cd /opt
+git clone https://Motasaith:YOUR_TOKEN@github.com/Motasaith/MCP_Upscale_Face-Enhancer_Remove-BG.git wisetech-mcp
+cd wisetech-mcp
+npm install
+npm run build
+```
+
+> **Note:** The repo is safe to make public — all secrets are in `.env` (gitignored), `SECURITY.md` is gitignored, and the PHP reference folder is gitignored. The code on GitHub contains no API URLs or keys.
 
 ### Step 3: Create the `.env` file
 
