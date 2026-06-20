@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables — NEVER commit this
+.env
+
+# Security docs — contains deployment + security info, keep private
+SECURITY.md
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Original PHP plugin reference — contains API URLs, keep private
+Extra_Just_For_API_Info/
