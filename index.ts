@@ -135,6 +135,32 @@ async function downloadAsBase64(imageUrl: string): Promise<{ base64: string; ext
   return { base64: Buffer.from(buf).toString("base64"), ext, mime: mimeFor(ext) };
 }
 
+// ── Unified image input: accepts either a public URL or raw base64 data ───
+// This lets AI tools pass images from chat attachments (base64) OR from URLs.
+async function resolveImageInput(
+  imageUrl?: string,
+  imageBase64?: string
+): Promise<{ base64: string; ext: string; mime: string }> {
+  if (imageBase64) {
+    // Strip data-URI prefix if present (e.g. "data:image/jpeg;base64,/9j/4AAQ...")
+    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z]+;base64,/, "");
+    const buf = Buffer.from(cleanBase64, "base64");
+    if (buf.length > MAX_IMAGE_BYTES) {
+      throw new Error(`Image is ${(buf.length / 1024 / 1024).toFixed(1)}MB — exceeds the 10MB limit.`);
+    }
+    // Try to detect format from data-URI prefix, default to png
+    const prefixMatch = imageBase64.match(/^data:image\/([a-zA-Z]+);base64,/);
+    const ext = prefixMatch ? prefixMatch[1].toLowerCase() : "png";
+    return { base64: cleanBase64, ext, mime: mimeFor(ext) };
+  }
+
+  if (imageUrl) {
+    return downloadAsBase64(imageUrl);
+  }
+
+  throw new Error("No image provided. Pass either imageUrl (public URL) or imageBase64 (raw base64 data).");
+}
+
 function withTimeout(ms: number) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -151,18 +177,19 @@ const server = new McpServer({
 server.tool(
   "upscale_image",
   "Upscales an image to a higher resolution using WiseTech's AI upscaler. " +
-    "Provide a publicly accessible image URL; returns the upscaled image as base64 PNG. " +
+    "Pass either a publicly accessible image URL OR raw base64 image data. " +
+    "Returns the upscaled image as base64 PNG. " +
     "Supported formats: JPG, JPEG, PNG, GIF, JFIF, WEBP, BMP, ICO, SVG, AVIF. Max 10MB.",
   {
-    imageUrl: z.string().url().describe("Public URL of the image to upscale."),
+    imageUrl: z.string().optional().describe("Public URL of the image to upscale. Use this OR imageBase64."),
+    imageBase64: z.string().optional().describe("Raw base64-encoded image data (with or without data-URI prefix). Use this OR imageUrl. Pass this when the image is a chat attachment with no public URL."),
   },
-  async ({ imageUrl }) => {
+  async ({ imageUrl, imageBase64 }) => {
     try {
-      const ext = extOf(imageUrl);
+      const { base64, ext } = await resolveImageInput(imageUrl, imageBase64);
       if (ext && !UPSCALE_FORMATS.includes(ext)) {
         throw new Error(`Unsupported format ".${ext}". Allowed: ${UPSCALE_FORMATS.join(", ")}`);
       }
-      const { base64 } = await downloadAsBase64(imageUrl);
 
       const { controller, clear } = withTimeout(API_TIMEOUT_MS);
       const apiRes = await fetch(`${mainApiBase}/upscale_web_v2`, {
@@ -195,18 +222,19 @@ server.tool(
 server.tool(
   "enhance_face",
   "Enhances faces in an image using WiseTech's AI face enhancer. " +
-    "Provide a publicly accessible image URL; returns the enhanced image as base64 PNG. " +
+    "Pass either a publicly accessible image URL OR raw base64 image data. " +
+    "Returns the enhanced image as base64 PNG. " +
     "Supported formats: JPG, JPEG, PNG, GIF, JFIF, WEBP, BMP, ICO, SVG, AVIF. Max 10MB.",
   {
-    imageUrl: z.string().url().describe("Public URL of the image whose faces should be enhanced."),
+    imageUrl: z.string().optional().describe("Public URL of the image whose faces should be enhanced. Use this OR imageBase64."),
+    imageBase64: z.string().optional().describe("Raw base64-encoded image data (with or without data-URI prefix). Use this OR imageUrl. Pass this when the image is a chat attachment with no public URL."),
   },
-  async ({ imageUrl }) => {
+  async ({ imageUrl, imageBase64 }) => {
     try {
-      const ext = extOf(imageUrl);
+      const { base64, ext } = await resolveImageInput(imageUrl, imageBase64);
       if (ext && !FACE_FORMATS.includes(ext)) {
         throw new Error(`Unsupported format ".${ext}". Allowed: ${FACE_FORMATS.join(", ")}`);
       }
-      const { base64 } = await downloadAsBase64(imageUrl);
 
       const { controller, clear } = withTimeout(API_TIMEOUT_MS);
       const apiRes = await fetch(`${mainApiBase}/faceenhance_web`, {
@@ -239,19 +267,20 @@ server.tool(
 server.tool(
   "remove_background",
   "Removes the background from an image using WiseTech's AI background remover. " +
-    "Provide a publicly accessible image URL; returns the background-removed image as base64 PNG. " +
+    "Pass either a publicly accessible image URL OR raw base64 image data. " +
+    "Returns the background-removed image as base64 PNG. " +
     "This is an async API (upload → process → poll → download) handled automatically. " +
     "Supported formats: JPG, JPEG, PNG, WEBP, JFIF, BMP. Max 10MB.",
   {
-    imageUrl: z.string().url().describe("Public URL of the image to remove the background from."),
+    imageUrl: z.string().optional().describe("Public URL of the image to remove the background from. Use this OR imageBase64."),
+    imageBase64: z.string().optional().describe("Raw base64-encoded image data (with or without data-URI prefix). Use this OR imageUrl. Pass this when the image is a chat attachment with no public URL."),
   },
-  async ({ imageUrl }) => {
+  async ({ imageUrl, imageBase64 }) => {
     try {
-      const ext = extOf(imageUrl);
+      const { base64, mime, ext } = await resolveImageInput(imageUrl, imageBase64);
       if (ext && !BG_FORMATS.includes(ext)) {
         throw new Error(`Unsupported format ".${ext}". Allowed: ${BG_FORMATS.join(", ")}`);
       }
-      const { base64, mime } = await downloadAsBase64(imageUrl);
 
       // Generate a unique image name (matches the WP plugin's scheme)
       const safeExt = ext || "png";
