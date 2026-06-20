@@ -1,5 +1,7 @@
 import "dotenv/config";
 import express from "express";
+import https from "https";
+import fs from "fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -362,7 +364,21 @@ app.post("/mcp", async (req, res) => {
 });
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
-app.listen(PORT, () => {
-  console.log(`WiseTech Image MCP server listening on :${PORT} (POST /mcp)`);
-  console.log(`Tools: upscale_image, enhance_face, remove_background`);
-});
+const HTTPS_CERT_DIR = process.env.HTTPS_CERT_DIR || ""; // e.g. /etc/letsencrypt/live/mcp.yourdomain.com
+
+// ── Start server (HTTPS if cert is configured, otherwise HTTP) ────────────
+if (HTTPS_CERT_DIR) {
+  const certOptions = {
+    key: fs.readFileSync(`${HTTPS_CERT_DIR}/privkey.pem`),
+    cert: fs.readFileSync(`${HTTPS_CERT_DIR}/fullchain.pem`),
+  };
+  https.createServer(certOptions, app).listen(PORT, () => {
+    console.log(`WiseTech Image MCP server listening on :${PORT} (HTTPS, POST /mcp)`);
+    console.log(`Tools: upscale_image, enhance_face, remove_background`);
+  });
+} else {
+  app.listen(PORT, () => {
+    console.log(`WiseTech Image MCP server listening on :${PORT} (HTTP, POST /mcp)`);
+    console.log(`Tools: upscale_image, enhance_face, remove_background`);
+  });
+}

@@ -40,7 +40,8 @@ All config lives in `.env` (never committed to git). Copy `.env.example` to `.en
 | `WISETECH_BG_API_URL` | No | Pin a specific bg API host (skips DNS) |
 | `WISETECH_API_KEY` | No | API key if WiseTech adds one (currently not needed) |
 | `WISETECH_AUTH_HEADER` | No | Header name for the API key (e.g. `x-api-key`) |
-| `PORT` | No | HTTP port (default: `3000`, Heroku sets this automatically) |
+| `PORT` | No | HTTP port (default: `3000`, use `8443` for VPS HTTPS) |
+| `HTTPS_CERT_DIR` | No | Path to Let's Encrypt cert dir. When set, server uses HTTPS directly (no nginx needed). Example: `/etc/letsencrypt/live/mcp.yourdomain.com` |
 
 ### DNS auto-refresh
 
@@ -123,123 +124,184 @@ Use this URL + your `MCP_AUTH_KEY` in Claude / ChatGPT / Grok (see below).
 
 VPS is better than Heroku for this because image processing can take up to 3 minutes (Heroku free tier times out at 30s).
 
-### Step 1: Upload the code
+This guide is written for **your specific VPS** (Ubuntu 24.04, IP `167.88.43.163`).
+
+### Your VPS current state
+
+| Service | Port | Status |
+|---------|------|--------|
+| Docker (n8n) | 3000 | ⚠️ Taken — don't use |
+| OpenVPN | 80 | ⚠️ Taken — don't use |
+| nginx | 443, 8080 | ⚠️ Taken (n8n.conf) |
+| Redis | 6379 | In use |
+| SSH | 22 | In use |
+| **8443** | **free** | ✅ We'll use this |
+
+**Strategy:** Use port `8443` with HTTPS directly from Node (no nginx needed). This avoids touching any existing services — no conflicts with n8n, OpenVPN, or nginx.
+
+### Step 1: Install pm2 (process manager)
+
+pm2 is not installed on your VPS yet. Install it:
 
 ```bash
-# On your VPS
-git clone <your-repo-url> /opt/wisetech-mcp
-cd /opt/wisetech-mcp
+npm install -g pm2
+```
+
+### Step 2: Clone the repo
+
+```bash
+cd /opt
+git clone https://github.com/Motasaith/MCP_Upscale_Face-Enhancer_Remove-BG.git wisetech-mcp
+cd wisetech-mcp
 npm install
 npm run build
 ```
 
-### Step 2: Create the `.env` file
+### Step 3: Create the `.env` file
 
 ```bash
 nano /opt/wisetech-mcp/.env
 ```
 
 ```env
-MCP_AUTH_KEY=your-strong-random-key-here
+MCP_AUTH_KEY=GENERATE_A_STRONG_KEY_HERE
 WISETECH_MAIN_DNS=https://sd.rad-wi.com
 WISETECH_BG_DNS=https://ibgc.rad-wi.com/
 WISETECH_MAIN_FALLBACK=http://34.232.100.156:5454
 WISETECH_BG_FALLBACK=http://35.190.164.209:5454
 WISETECH_API_KEY=
 WISETECH_AUTH_HEADER=
-PORT=3000
+PORT=8443
+HTTPS_CERT_DIR=/etc/letsencrypt/live/mcp.yourdomain.com
 ```
 
-Generate a strong key:
+Generate a strong auth key:
 ```bash
 openssl rand -hex 32
 ```
 
-### Step 3: Lock down `.env`
-
+Lock down the file:
 ```bash
 chmod 600 /opt/wisetech-mcp/.env
 chown root:root /opt/wisetech-mcp/.env
 ```
 
-### Step 4: Run as a systemd service (stays alive after reboot)
+### Step 4: Point a subdomain at this VPS
+
+In your DNS dashboard (wherever you manage your domain — Cloudflare, Namecheap, etc.), add an A record:
+
+```
+A   mcp.yourdomain.com   →   167.88.43.163
+```
+
+Wait a few minutes for DNS to propagate. Verify:
+```bash
+dig mcp.yourdomain.com +short
+# should return 167.88.43.163
+```
+
+### Step 5: Get the SSL certificate (DNS challenge — no port 80 needed)
+
+This method avoids touching port 80 (which OpenVPN uses). It uses a DNS TXT record instead.
 
 ```bash
-nano /etc/systemd/system/wisetech-mcp.service
+apt install -y certbot
+certbot certonly --manual --preferred-challenges dns -d mcp.yourdomain.com
 ```
 
-```ini
-[Unit]
-Description=WiseTech Image MCP Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/wisetech-mcp
-ExecStart=/usr/bin/node dist/index.js
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/wisetech-mcp/.env
-
-[Install]
-WantedBy=multi-user.target
+Certbot will print something like:
 ```
+Please deploy a DNS TXT record under:
+_acme-challenge.mcp.yourdomain.com
+with this value:
+abc123def456...
+```
+
+Go to your DNS dashboard, add that TXT record, wait ~2 minutes, then press Enter in the terminal.
+
+Certbot saves the cert to `/etc/letsencrypt/live/mcp.yourdomain.com/`.
+
+**Note:** This cert expires in 90 days. Since it's a manual DNS challenge, you'll need to repeat this step before it expires. If your domain is on Cloudflare, you can automate it later with `certbot-dns-cloudflare`.
+
+### Step 6: Start the server with pm2
 
 ```bash
-systemctl daemon-reload
-systemctl enable wisetech-mcp
-systemctl start wisetech-mcp
-systemctl status wisetech-mcp    # should say "active (running)"
+cd /opt/wisetech-mcp
+pm2 start dist/index.js --name wisetech-mcp
+pm2 save
+pm2 startup    # follow the instructions it prints to make it survive reboots
 ```
 
-### Step 5: Add HTTPS with nginx (required for AI tools)
+Check it's running:
+```bash
+pm2 status
+pm2 logs wisetech-mcp --lines 10
+```
 
-AI tools like Claude/ChatGPT require HTTPS URLs. Use nginx + Let's Encrypt (free SSL).
+You should see:
+```
+WiseTech Image MCP server listening on :8443 (HTTPS, POST /mcp)
+Tools: upscale_image, enhance_face, remove_background
+[DNS] APIs resolved successfully.
+```
+
+### Step 7: Open the port (if firewall is active)
 
 ```bash
-apt install nginx certbot python3-certbot-nginx -y
+ufw status
 ```
+
+If it says "active":
+```bash
+ufw allow 8443/tcp
+```
+
+If it says "inactive", skip this step.
+
+### Step 8: Test from outside
 
 ```bash
-nano /etc/nginx/sites-available/wisetech-mcp
-```
-
-```nginx
-server {
-    server_name your-domain.com;
-
-    location /mcp {
-        proxy_pass http://127.0.0.1:3000/mcp;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header Connection "";
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-        client_max_body_size 20m;
-    }
-}
-```
-
-```bash
-ln -s /etc/nginx/sites-available/wisetech-mcp /etc/nginx/sites-enabled/
-nginx -t
-systemctl reload nginx
-certbot --nginx -d your-domain.com
-```
-
-### Step 6: Verify
-
-```bash
-curl -X POST https://your-domain.com/mcp \
+curl -i -X POST https://mcp.yourdomain.com:8443/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer YOUR_MCP_AUTH_KEY" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-Your MCP URL is: `https://your-domain.com/mcp`
+You should see all three tools in the response.
+
+### Step 9: Connect to AI tools
+
+Your MCP URL is: `https://mcp.yourdomain.com:8443/mcp`
+
+Use this in Claude / ChatGPT / Grok (see the "Connecting to AI tools" section above).
+
+### Useful pm2 commands
+
+```bash
+pm2 status                    # see if it's running
+pm2 logs wisetech-mcp         # live logs (Ctrl+C to exit)
+pm2 restart wisetech-mcp      # restart after code changes
+pm2 stop wisetech-mcp         # stop
+pm2 delete wisetech-mcp       # remove from pm2
+```
+
+### Certificate renewal (every 90 days)
+
+Since we used a manual DNS challenge, auto-renewal won't work unattended. Before the cert expires:
+
+```bash
+certbot certonly --manual --preferred-challenges dns -d mcp.yourdomain.com
+pm2 restart wisetech-mcp
+```
+
+If your domain is on Cloudflare, you can automate this:
+```bash
+apt install -y python3-certbot-dns-cloudflare
+# Configure with your Cloudflare API token, then:
+certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.cloudflare.ini -d mcp.yourdomain.com
+# Then add a cron job for auto-renewal
+```
 
 ---
 
@@ -328,7 +390,7 @@ The entire async flow is hidden from the AI tool — it just gets the final imag
 
 ```
 wisetech-image-mcp/
-├── index.ts          # MCP server — all 3 tools
+├── index.ts          # MCP server — all 3 tools (supports HTTP + HTTPS)
 ├── package.json      # Dependencies + scripts
 ├── tsconfig.json     # TypeScript config
 ├── Procfile          # Heroku deployment config
@@ -337,7 +399,7 @@ wisetech-image-mcp/
 ├── .gitignore        # Blocks .env, SECURITY.md, node_modules from git
 ├── SECURITY.md       # Security & deployment details (kept private)
 ├── README.md         # This file
-└── Extra_Just_For_API_Info/   # Original PHP plugin reference code
+└── Extra_Just_For_API_Info/   # Original PHP plugin reference (gitignored)
 ```
 
 ---
